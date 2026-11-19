@@ -1,19 +1,18 @@
 #include <vegafem/volumetricMeshLoader.h>
-#include <GL/freeglut.h>
-
 #include <vegafem/corotationalLinearFEM.h>
 #include <vegafem/corotationalLinearFEMForceModel.h>
 #include <vegafem/generateMassMatrix.h>
 #include <vegafem/implicitBackwardEulerSparse.h>
+#include <GL/freeglut.h>
 
 #include <vector>
 #include <stdexcept>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <chrono>
 
 std::unique_ptr<vegafem::VolumetricMesh> mesh;
 
@@ -44,7 +43,7 @@ constexpr double timestep = 1.0 / 120.0;
 
 // Total force distributed across the free end.
 // Demonstration value, in the mesh's consistent force units.
-double loadMagnitude = 1000.0;
+double loadMagnitude = 500.0;
 int loadAxis = 1;
 
 void initialiseSimulation()
@@ -131,9 +130,9 @@ void initialiseSimulation()
             forceModel.get(),
             static_cast<int>(fixedDOFs.size()),
             fixedDOFs.data(),
-            0.1,     // Mass damping coefficient
-            0.001,   // Stiffness damping coefficient
-            10,      // Maximum nonlinear iterations
+            5.0,     // Mass damping coefficient
+            0.01,   // Stiffness damping coefficient
+            2,      // Maximum nonlinear iterations
             1e-6     // Convergence tolerance
         );
 
@@ -147,9 +146,36 @@ void initialiseSimulation()
 
 void simulationTimer(int)
 {
-    if (!paused)
+    using Clock = std::chrono::steady_clock;
+
+    static auto previousTime = Clock::now();
+    static double accumulator = 0.0;
+
+    const auto currentTime = Clock::now();
+
+    double elapsed =
+        std::chrono::duration<double>(
+            currentTime - previousTime
+        ).count();
+
+    previousTime = currentTime;
+
+    // Avoid a large catch-up after a breakpoint or window stall.
+    elapsed = std::min(elapsed, 0.1);
+
+    if (paused)
     {
-        std::fill(externalForces.begin(), externalForces.end(), 0.0);
+        accumulator = 0.0;
+    }
+    else
+    {
+        accumulator += elapsed;
+
+        std::fill(
+            externalForces.begin(),
+            externalForces.end(),
+            0.0
+        );
 
         if (loadEnabled)
         {
@@ -157,39 +183,66 @@ void simulationTimer(int)
                 -loadMagnitude / loadedVertices.size();
 
             for (int vertex : loadedVertices)
-                externalForces[3 * vertex + loadAxis] = forcePerVertex;
+            {
+                externalForces[3 * vertex + loadAxis] =
+                    forcePerVertex;
+            }
         }
 
         integrator->SetExternalForces(externalForces.data());
 
-        // Two steps advance approximately 1/60 second.
-        for (int step = 0; step < 2; ++step)
+        // Limit work per callback so the window stays responsive.
+        constexpr int maxStepsPerCallback = 2;
+        int steps = 0;
+
+        while (accumulator >= timestep &&
+            steps < maxStepsPerCallback)
         {
             if (integrator->DoTimestep() != 0)
             {
                 paused = true;
+                accumulator = 0.0;
+
                 std::cerr
-                    << "Solver failed. Simulation paused; press R to reset.\n";
+                    << "Solver failed. Press R to reset.\n";
                 break;
             }
+
+            accumulator -= timestep;
+            ++steps;
+
+            const double* displacement = integrator->Getq();
+
+            for (int i = 0; i < integrator->GetNumDOFs(); ++i)
+            {
+                if (!std::isfinite(displacement[i]))
+                {
+                    paused = true;
+                    accumulator = 0.0;
+
+                    std::cerr
+                        << "Invalid displacement. "
+                        << "Press R to reset.\n";
+                    break;
+                }
+            }
+
+            if (paused)
+                break;
         }
 
-        const double* displacement = integrator->Getq();
-
-        for (int i = 0; i < integrator->GetNumDOFs(); ++i)
+        // Drop excess backlog if calculations cannot keep up.
+        if (steps == maxStepsPerCallback &&
+            accumulator >= timestep)
         {
-            if (!std::isfinite(displacement[i]))
-            {
-                paused = true;
-                std::cerr
-                    << "Invalid displacement. Press R to reset.\n";
-                break;
-            }
+            accumulator = std::fmod(accumulator, timestep);
         }
     }
 
     glutPostRedisplay();
-    glutTimerFunc(16, simulationTimer, 0);
+
+    // Check again shortly; the clock controls the physics speed.
+    glutTimerFunc(1, simulationTimer, 0);
 }
 
 void display()
