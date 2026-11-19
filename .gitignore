@@ -1,0 +1,5 @@
+/build/
+/external/
+/.vs/
+CMakeUserPresets.json
+/main-viewer-backup.cpp
