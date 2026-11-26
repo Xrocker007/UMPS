@@ -12,7 +12,7 @@ set(VEGAFEM_BUILD_UTILITIES_GRAPHICS OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${VEGA_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/vega")
 
-add_executable(UMPS main.cpp)
+add_executable(UMPS main.cpp plasticForceModel.cpp)
 target_compile_features(UMPS PRIVATE cxx_std_17)
 target_link_libraries(UMPS PRIVATE vegafem::vegafem)
 find_package(OpenGL REQUIRED)

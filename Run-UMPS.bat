@@ -8,6 +8,6 @@ if not exist "build\Release\UMPS.exe" (
     exit /b 1
 )
 
-"build\Release\UMPS.exe" "%~dp0models\beam3\beam3_tet.veg"
+"build\Release\UMPS.exe" "%~dp0models\beam3\beam3_tet.veg" --plastic 30000
 
 if errorlevel 1 pause

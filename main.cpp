@@ -4,6 +4,7 @@
 #include <vegafem/generateMassMatrix.h>
 #include <vegafem/implicitBackwardEulerSparse.h>
 #include <GL/freeglut.h>
+#include "plasticForceModel.h"
 
 #include <vector>
 #include <stdexcept>
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <memory>
 #include <chrono>
+#include <string>
 
 std::unique_ptr<vegafem::VolumetricMesh> mesh;
 
@@ -29,7 +31,8 @@ int previousY = 0;
 // Declaration order ensures the integrator is destroyed first.
 std::unique_ptr<vegafem::SparseMatrix> massMatrix;
 std::unique_ptr<vegafem::CorotationalLinearFEM> elasticModel;
-std::unique_ptr<vegafem::CorotationalLinearFEMForceModel> forceModel;
+std::unique_ptr<vegafem::ForceModel> forceModel;
+PlasticForceModel* plasticModel = nullptr; // Owned by forceModel.
 std::unique_ptr<vegafem::ImplicitBackwardEulerSparse> integrator;
 
 std::vector<int> fixedDOFs;
@@ -46,7 +49,7 @@ constexpr double timestep = 1.0 / 120.0;
 double loadMagnitude = 500.0;
 int loadAxis = 1;
 
-void initialiseSimulation()
+void initialiseSimulation(double yieldStress)
 {
     const int vertexCount = mesh->getNumVertices();
     const int dofCount = 3 * vertexCount;
@@ -113,13 +116,19 @@ void initialiseSimulation()
 
     massMatrix.reset(generatedMass);
 
-    elasticModel =
-        std::make_unique<vegafem::CorotationalLinearFEM>(mesh.get());
-
-    forceModel =
-        std::make_unique<vegafem::CorotationalLinearFEMForceModel>(
+    if (yieldStress > 0.0)
+    {
+        auto model = std::make_unique<PlasticForceModel>(*mesh, yieldStress);
+        plasticModel = model.get();
+        forceModel = std::move(model);
+    }
+    else
+    {
+        elasticModel = std::make_unique<vegafem::CorotationalLinearFEM>(mesh.get());
+        forceModel = std::make_unique<vegafem::CorotationalLinearFEMForceModel>(
             elasticModel.get(), 1
         );
+    }
 
     // Implicit backward Euler with modest Rayleigh damping.
     integrator =
@@ -160,7 +169,7 @@ void simulationTimer(int)
 
     previousTime = currentTime;
 
-    // Avoid a large catch-up after a breakpoint or window stall.
+    // Avoid a large catch-up after a breakpoint or stall.
     elapsed = std::min(elapsed, 0.1);
 
     if (paused)
@@ -229,6 +238,14 @@ void simulationTimer(int)
 
             if (paused)
                 break;
+
+            if (plasticModel && !plasticModel->advancePlasticity(displacement, timestep))
+            {
+                paused = true;
+                accumulator = 0.0;
+                std::cerr << "Invalid plastic step. Press R to reset.\n";
+                break;
+            }
         }
 
         // Drop excess backlog if calculations cannot keep up.
@@ -383,6 +400,7 @@ void keyboard(unsigned char key, int, int)
         paused = false;
 
         integrator->SetExternalForcesToZero();
+        forceModel->ResetToZero();
         integrator->ResetToRest();
 
         angleX = 20.0;
@@ -395,9 +413,25 @@ void keyboard(unsigned char key, int, int)
 
 int main(int argc, char* argv[])
 {
-    if (argc != 2)
+    double yieldStress = 0.0;
+    try
     {
-        std::cerr << "Usage: UMPS.exe path-to-mesh.veg\n";
+        if (argc == 4 && std::string(argv[2]) == "--plastic")
+        {
+            const std::string argument = argv[3];
+            std::size_t parsed = 0;
+            yieldStress = std::stod(argument, &parsed);
+            if (parsed != argument.size() || !std::isfinite(yieldStress) || yieldStress <= 0.0)
+                throw std::invalid_argument("Invalid yield stress");
+        }
+        else if (argc != 2)
+        {
+            throw std::invalid_argument("Invalid arguments");
+        }
+    }
+    catch (const std::exception&)
+    {
+        std::cerr << "Usage: UMPS.exe path-to-mesh.veg [--plastic positive-yield-stress]\n";
         return 1;
     }
 
@@ -456,12 +490,22 @@ int main(int argc, char* argv[])
 
     try
     {
-        initialiseSimulation();
+        initialiseSimulation(yieldStress);
     }
-    catch (...)
+    catch (const std::exception& error)
     {
+        std::cerr << error.what() << '\n';
         std::cerr << "Could not initialise the simulation.\n";
         return 1;
+    }
+
+    if (plasticModel)
+    {
+        // The bundled beam is slender. Use a smaller demonstration load
+        // for the finite-strain model to avoid inverting tetrahedra.
+        loadMagnitude = 20.0;
+        std::cout << "Plastic yield stress: " << yieldStress
+                  << ", tip load: " << loadMagnitude << '\n';
     }
 
     std::cout << "UMPS mesh viewer\n"
